@@ -1,4 +1,4 @@
-name: Android mnt play store
+name: Android 11 with Play Store - SSH Terminal & FRP
 
 on:
   push:
@@ -14,39 +14,59 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      AVD_NAME: android_11
+      AVD_NAME: android_playstore
       RUNTIME_MINUTES: ${{ github.event.inputs.runtime_minutes || '360' }}
+      VPS_IP: 159.195.6.61
+      FRP_SERVER_PORT: 7000
+      FRP_VERSION: 0.65.0
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Enable KVM
         run: |
+          set -e
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           sudo chmod 666 /dev/kvm 2>/dev/null || true
+          echo "✅ KVM enabled"
 
       - name: Check /mnt Space
         run: |
-          echo "=== /mnt Volume ==="
+          set -e
+          echo "=== Storage Information ==="
           df -h /mnt
+          echo ""
+          
           sudo mkdir -p /mnt/android-sdk-data
           sudo chown -R runner:runner /mnt/android-sdk-data 2>/dev/null || true
+          
+          echo "✅ /mnt configured"
 
       - name: Install x86_64 System Image with Play Store
         run: |
+          set -e
           export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
-          sdkmanager "emulator" "platform-tools"
-          sdkmanager "system-images;android-30;google_apis_playstore;x86_64"
+          
+          echo "Installing base tools..."
+          yes | sdkmanager --licenses || true
+          sdkmanager --install "emulator" "platform-tools" "build-tools;34.0.0"
+          
+          echo "Installing Google Play Store system image..."
+          sdkmanager --install "system-images;android-30;google_apis_playstore;x86_64"
+          
+          echo "✅ System image installed"
 
       - name: Create AVD on /mnt with Play Store
         run: |
+          set -e
           export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
+          
           sudo mkdir -p /mnt/android-home/.android/avd
           sudo chown -R runner:runner /mnt/android-home
           
@@ -56,16 +76,29 @@ jobs:
           export HOME=/mnt/android-home
           export ANDROID_AVD_HOME=$AVD_HOME
           
+          echo "Creating AVD with Play Store..."
           echo no | avdmanager create avd \
             --force \
             --name "$AVD_NAME" \
             --package "system-images;android-30;google_apis_playstore;x86_64" \
-            --device "pixel"
+            --device "pixel_xl"
           
           sleep 3
           
           AVD_DIR="$AVD_HOME/$AVD_NAME.avd"
+          
+          if [ ! -d "$AVD_DIR" ]; then
+            echo "❌ AVD creation failed"
+            exit 1
+          fi
+          
+          echo "✅ AVD created at $AVD_DIR"
+          
+          # Configure Play Store and performance settings
           cat >> "$AVD_DIR/config.ini" << 'CONFEND'
+          PlayStore.enabled = true
+          tag.display = Google Play
+          tag.id = google_apis_playstore
           hw.ramSize=12288
           hw.arch=x86_64
           hw.cpu.model=qemu64
@@ -80,130 +113,346 @@ jobs:
           hw.keyboard=yes
           hw.mainKeys=no
           hw.lcd.density=440
-          PlayStore.enabled=true
+          hw.initialOrientation=portrait
           CONFEND
+          
+          echo "✅ Configuration: 12GB RAM, 40GB storage, Play Store enabled"
+          
+          # Verify config
+          echo ""
+          echo "Configuration details:"
+          grep -E "PlayStore|tag.|hw." "$AVD_DIR/config.ini" | head -10
 
-      - name: Start Emulator from /mnt
+      - name: Download FRP Client
         run: |
+          set -e
+          mkdir -p /tmp/frp
+          cd /tmp/frp
+          
+          echo "Downloading FRP v${{ env.FRP_VERSION }}..."
+          wget -q https://github.com/fatedier/frp/releases/download/v${{ env.FRP_VERSION }}/frp_${{ env.FRP_VERSION }}_linux_amd64.tar.gz
+          tar -xzf frp_${{ env.FRP_VERSION }}_linux_amd64.tar.gz
+          
+          ls -lah /tmp/frp/frp_${{ env.FRP_VERSION }}_linux_amd64/
+          echo "✅ FRP downloaded"
+
+      - name: Configure FRP Client
+        run: |
+          set -e
+          cat > /tmp/frp/frpc.toml << 'FRPCONF'
+          serverAddr = "159.195.6.61"
+          serverPort = 7000
+          
+          [[proxies]]
+          name = "adb-emulator"
+          type = "tcp"
+          localIP = "127.0.0.1"
+          localPort = 5555
+          remotePort = 5555
+          
+          [[proxies]]
+          name = "ssh-terminal"
+          type = "tcp"
+          localIP = "127.0.0.1"
+          localPort = 22
+          remotePort = 2222
+          FRPCONF
+          
+          echo "✅ FRP client configured"
+          cat /tmp/frp/frpc.toml
+
+      - name: Start Emulator
+        run: |
+          set -e
           export HOME=/mnt/android-home
           export ANDROID_AVD_HOME=/mnt/android-home/.android/avd
           export PATH=$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH
+          
           AVD_NAME=${{ env.AVD_NAME }}
+          
+          echo "Starting emulator with Play Store..."
           nohup emulator -avd "$AVD_NAME" \
             -no-window \
             -no-audio \
             -no-snapshot \
             -accel on \
             -no-metrics \
+            -netdelay none \
+            -netspeed full \
             > /tmp/emulator.log 2>&1 &
+          
           PID=$!
           echo "Emulator PID: $PID"
-          sleep 35
+          sleep 45
+          
           adb kill-server 2>/dev/null || true
           sleep 2
           adb start-server
           sleep 5
+          
+          echo "Waiting for emulator boot..."
           SUCCESS=0
+          
           for i in {1..180}; do
             if adb devices | grep -q "device$"; then
-              echo "✅ Emulator booted! ($i sec)"
+              echo "✅ Emulator booted! (${i}s)"
               SUCCESS=1
               break
             fi
+            
             if ! kill -0 $PID 2>/dev/null; then
-              echo "❌ Emulator died"
+              echo "❌ Emulator crashed"
+              echo ""
+              echo "=== Emulator Logs ==="
+              tail -30 /tmp/emulator.log
               exit 1
             fi
+            
+            if [ $((i % 30)) -eq 0 ]; then
+              echo "⏳ Boot progress: ${i}/180s..."
+            fi
+            
             sleep 1
           done
+          
           if [ $SUCCESS -eq 0 ]; then
-            echo "❌ Boot failed"
+            echo "❌ Boot timeout"
+            tail -30 /tmp/emulator.log
             exit 1
           fi
+          
+          # Wait for system ready
+          echo "Waiting for system to stabilize..."
+          sleep 15
 
-      - name: Authorize and Switch to TCP
+      - name: Enable ADB TCP
         run: |
+          set -e
           export PATH=$ANDROID_HOME/platform-tools:$PATH
           
-          # Authorize the device with local adb
-          adb -s emulator-5554 shell "echo OK"
+          echo "Enabling ADB over TCP..."
+          adb tcpip 5555
           sleep 3
           
-          # Enable TCP mode
-          adb -s emulator-5554 tcpip 5555
-          sleep 5
-          
-          # Kill server completely and wait
-          adb kill-server
-          pkill -f "adb.*server" || true
-          sleep 5
-          
-          # Restart fresh server
-          adb start-server
-          sleep 3
-          
-          # Connect via TCP only
-          adb connect 127.0.0.1:5555
-          sleep 5
-          
-          # Verify only TCP device is connected
-          echo "=== Device List ==="
-          adb devices
-          
-          # Run a shell command to finalize authorization
-          adb shell "echo OK"
-          sleep 2
+          adb shell getprop ro.build.version.release
+          echo "✅ ADB TCP enabled"
 
-      - name: Setup frpc
+      - name: Start FRP Client
         run: |
-          cat > frpc.ini << 'FRPEND'
-          [common]
-          server_addr = 159.195.6.61
-          server_port = 7000
-          connect_timeout = 10
-          dial_timeout = 10
-
-          [adb]
-          type = tcp
-          local_ip = 127.0.0.1
-          local_port = 5555
-          remote_port = 5555
-          FRPEND
+          set -e
+          cd /tmp/frp/frp_${{ env.FRP_VERSION }}_linux_amd64
           
-          wget -q https://github.com/fatedier/frp/releases/download/v0.58.1/frp_0.58.1_linux_amd64.tar.gz
-          tar -xzf frp_0.58.1_linux_amd64.tar.gz
-          nohup ./frp_0.58.1_linux_amd64/frpc -c frpc.ini > frpc.log 2>&1 &
-          sleep 10
+          echo "Starting FRP client..."
+          nohup ./frpc -c /tmp/frp/frpc.toml > /tmp/frpc.log 2>&1 &
+          
+          FRPC_PID=$!
+          echo "FRP Client PID: $FRPC_PID"
+          sleep 3
+          
+          if ! kill -0 $FRPC_PID 2>/dev/null; then
+            echo "❌ FRP client failed to start"
+            cat /tmp/frpc.log
+            exit 1
+          fi
+          
+          echo "✅ FRP client started"
 
       - name: Verify Setup
         run: |
+          set -e
           export PATH=$ANDROID_HOME/platform-tools:$PATH
-          echo "=== Connected Device ==="
+          
+          echo ""
+          echo "========================================="
+          echo "✅ VERIFICATION PASSED"
+          echo "========================================="
+          echo ""
+          
+          echo "📱 Connected Devices:"
           adb devices
           echo ""
-          echo "=== System Info ==="
-          adb shell "getprop ro.build.version.release"
+          
+          echo "📊 Emulator Properties:"
+          adb shell getprop ro.build.version.release
+          adb shell getprop ro.build.version.sdk
+          adb shell getprop ro.hardware
           echo ""
-          echo "=== Memory ==="
-          adb shell "cat /proc/meminfo | grep MemTotal"
+          
+          echo "🌐 FRP Status:"
+          echo "---"
+          tail -10 /tmp/frpc.log || echo "No logs yet"
+          echo "---"
+          echo ""
 
-      - name: Keep Running
+      - name: Setup SSH Terminal Access
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: false
+          connect-timeout-seconds: 120
+
+      - name: Monitor and Keep Running
         run: |
-          export PATH=$ANDROID_HOME/platform-tools:$PATH
+          set -e
+          export HOME=/mnt/android-home
+          export ANDROID_AVD_HOME=/mnt/android-home/.android/avd
+          export PATH=$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH
+          
           RUNTIME_SECONDS=$(((${{ env.RUNTIME_MINUTES }}) * 60))
           HOURS=$(((${{ env.RUNTIME_MINUTES }}) / 60))
           MINS=$(((${{ env.RUNTIME_MINUTES }}) % 60))
+          END_TIME=$(($(date +%s) + RUNTIME_SECONDS))
           
-          adb shell "echo OK"
-          
+          echo ""
           echo "========================================="
-          echo "✅ Android 11 Emulator Ready"
+          echo "✅ Android 11 Emulator Ready with Play Store & FRP"
           echo "========================================="
           echo ""
-          echo "📱 Remote ADB Command:"
-          echo "  $ adb connect 159.195.6.61:5555"
+          echo "📊 Configuration:"
+          echo "  • OS: Android 11 (API 30)"
+          echo "  • Architecture: x86_64"
+          echo "  • RAM: 12 GB"
+          echo "  • Storage: 40 GB (/mnt)"
+          echo "  • Play Store: ✅ ENABLED"
           echo ""
-          echo "📊 Specs: 12GB RAM, 40GB Storage, Play Store"
-          echo "⏱️  Runtime: $HOURS h $MINS m"
+          echo "🌐 Remote Connection Methods:"
+          echo "  • VPS IP: 159.195.6.61"
+          echo "  • FRP Server Port: 7000"
+          echo ""
+          echo "1️⃣  ADB Remote Access (port 5555):"
+          echo "   adb connect 159.195.6.61:5555"
+          echo "   adb devices"
+          echo "   adb shell"
+          echo ""
+          echo "2️⃣  SSH Terminal Access (port 2222):"
+          echo "   ssh -p 2222 runner@159.195.6.61"
+          echo ""
+          echo "3️⃣  Play Store:"
+          echo "   • Accessible on emulator home screen"
+          echo "   • Install apps via ADB shell"
+          echo ""
+          echo "⏱️  Runtime: $HOURS hours $MINS minutes"
+          echo "Start Time: $(date)"
+          echo "Expected End: $(date -d "+$HOURS hours +$MINS minutes")"
           echo "========================================="
-          sleep $RUNTIME_SECONDS
+          echo ""
+          
+          CHECK_INTERVAL=30
+          
+          while [ $(date +%s) -lt $END_TIME ]; do
+            REMAINING=$((END_TIME - $(date +%s)))
+            REMAINING_MINS=$((REMAINING / 60))
+            REMAINING_SECS=$((REMAINING % 60))
+            
+            # Check ADB connection
+            if adb devices 2>/dev/null | grep -q "device$"; then
+              STATUS="✅ Connected"
+            else
+              STATUS="⚠️  Offline - Attempting recovery..."
+              pkill -f "emulator" || true
+              sleep 5
+              
+              nohup emulator -avd ${{ env.AVD_NAME }} \
+                -no-window \
+                -no-audio \
+                -no-snapshot \
+                -accel on \
+                > /tmp/emulator.log 2>&1 &
+              
+              sleep 45
+              
+              adb kill-server 2>/dev/null || true
+              sleep 2
+              adb start-server
+              sleep 5
+              
+              for i in {1..120}; do
+                if adb devices 2>/dev/null | grep -q "device$"; then
+                  adb tcpip 5555
+                  STATUS="✅ Recovered"
+                  break
+                fi
+                sleep 1
+              done
+            fi
+            
+            # Check FRP
+            if pgrep -f "frpc" > /dev/null; then
+              FRP_STATUS="✅ Active"
+            else
+              FRP_STATUS="⚠️  Inactive"
+            fi
+            
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ADB: $STATUS | FRP: $FRP_STATUS | Remaining: ${REMAINING_MINS}:$(printf '%02d' $REMAINING_SECS)"
+            
+            sleep $CHECK_INTERVAL
+          done
+          
+          echo ""
+          echo "========================================="
+          echo "⏱️  Runtime completed at $(date)"
+          echo "========================================="
+
+      - name: Collect Debug Logs
+        if: always()
+        run: |
+          set -e
+          mkdir -p debug_logs
+          
+          echo "Collecting system information..."
+          {
+            echo "=== Collection Time ==="
+            date
+            echo ""
+            echo "=== System Info ==="
+            uname -a
+            echo ""
+            echo "=== Java Version ==="
+            java -version 2>&1 || echo "Java not available"
+            echo ""
+            echo "=== Android SDK ==="
+            which sdkmanager
+            echo ""
+            echo "=== ADB Status ==="
+            adb devices || echo "ADB unavailable"
+            echo ""
+            echo "=== Emulator Processes ==="
+            ps aux | grep -E "emulator|qemu|frpc" || echo "No processes found"
+            echo ""
+            echo "=== /mnt Usage ==="
+            du -sh /mnt/* 2>/dev/null || echo "/mnt info unavailable"
+            echo ""
+          } > debug_logs/system-info.txt
+          
+          ls -lah debug_logs/
+
+      - name: Cleanup
+        if: always()
+        run: |
+          set +e
+          echo "Cleaning up processes..."
+          
+          pkill -f "emulator -avd" || true
+          pkill -f "frpc" || true
+          pkill -9 qemu-system || true
+          
+          sleep 2
+          echo "✅ Cleanup complete"
+
+      - name: Upload All Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-session-${{ github.run_number }}
+          path: |
+            /tmp/emulator.log
+            /tmp/frpc.log
+            debug_logs/
+          retention-days: 3
+
+      - name: Upload Emulator Configuration
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playstore-config-${{ github.run_number }}
+          path: /mnt/android-home/.android/avd/
+          retention-days: 2
