@@ -1,4 +1,4 @@
-name: Android mnt SSH Terminal with FRP - No Auth
+name: Android mnt SSH Terminal with FRP - Working
 
 on:
   push:
@@ -181,31 +181,20 @@ jobs:
             exit 1
           fi
 
-      - name: Disable ADB Authentication - ALLOW ANY CONNECTION
+      - name: Enable ADB TCP - NO AUTH
         run: |
           set -e
           export PATH=$ANDROID_HOME/platform-tools:$PATH
           
-          echo "Step 1: Disabling ADB authentication on emulator..."
-          # Remove all ADB keys to disable authentication
-          adb shell rm -f /data/misc/adb/adb_keys || true
-          
-          echo "Step 2: Restarting ADB daemon..."
-          adb shell stop adbd
-          sleep 2
-          adb shell start adbd
-          sleep 3
-          
-          echo "Step 3: Enabling ADB TCP port 5555..."
+          echo "Enabling ADB TCP port 5555..."
           adb tcpip 5555
           sleep 3
           
-          echo "Step 4: Verification..."
+          echo "Verifying connection..."
           adb devices
           
           echo ""
-          echo "✅ ADB AUTHENTICATION DISABLED"
-          echo "✅ Ready for unauthenticated remote connections"
+          echo "✅ ADB TCP Enabled - Ready for remote connection"
 
       - name: Start FRP Client
         run: |
@@ -232,7 +221,7 @@ jobs:
           
           echo ""
           echo "╔════════════════════════════════════════════════════════════════╗"
-          echo "║               ✅ SETUP COMPLETE - NO AUTH REQUIRED              ║"
+          echo "║               ✅ EMULATOR READY FOR CONNECTION                  ║"
           echo "╚════════════════════════════════════════════════════════════════╝"
           echo ""
           
@@ -242,12 +231,6 @@ jobs:
           
           echo "📊 Emulator Information:"
           adb shell getprop ro.build.version.release
-          echo ""
-          
-          echo "🌐 FRP Tunnel Status:"
-          if pgrep -f frpc > /dev/null; then
-            echo "✅ FRP tunnel is active"
-          fi
           echo ""
 
       - name: Setup SSH Terminal Access via tmate
@@ -277,21 +260,19 @@ jobs:
           echo "  • Architecture: x86_64"
           echo "  • RAM: 12 GB | Storage: 40 GB (/mnt)"
           echo "  • Play Store: ✅ ENABLED"
-          echo "  • ADB Authentication: ❌ DISABLED"
           echo ""
-          echo "🌐 REMOTE CONNECTION (DIRECT - NO AUTH):"
+          echo "🌐 REMOTE CONNECTION:"
           echo ""
-          echo "  From Termux/Local Machine:"
-          echo "  ┌──────────────────────────────────────┐"
-          echo "  │ adb connect 159.195.6.61:5555        │"
-          echo "  │ adb devices                          │"
-          echo "  │ adb shell                            │"
-          echo "  │ adb install app.apk                  │"
-          echo "  └──────────────────────────────────────┘"
+          echo "  ┌──────────────────────────────────────────────────────┐"
+          echo "  │ From Termux/Linux/Mac (NO SETUP NEEDED):             │"
+          echo "  │                                                      │"
+          echo "  │ adb connect 159.195.6.61:5555                       │"
+          echo "  │ adb devices                                          │"
+          echo "  │ adb shell                                            │"
+          echo "  │ adb install app.apk                                  │"
+          echo "  └──────────────────────────────────────────────────────┘"
           echo ""
           echo "⏱️  RUNTIME: $HOURS hours $MINS minutes"
-          echo ""
-          echo "╔════════════════════════════════════════════════════════════════╗"
           echo ""
           
           CHECK_INTERVAL=60
