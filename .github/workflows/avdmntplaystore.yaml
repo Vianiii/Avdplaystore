@@ -1,4 +1,4 @@
-name: Android mnt SSH Terminal with FRP
+name: Android mnt SSH Terminal with FRP - FIXED
 
 on:
   push:
@@ -47,7 +47,7 @@ jobs:
           sdkmanager "emulator" "platform-tools"
           sdkmanager "system-images;android-30;google_apis_playstore;x86_64"
 
-      - name: Create AVD on /mnt
+      - name: Create AVD on /mnt with Play Store
         run: |
           export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
           
@@ -146,7 +146,7 @@ jobs:
           
           PID=$!
           echo "Emulator PID: $PID"
-          sleep 40
+          sleep 45
           
           adb kill-server 2>/dev/null || true
           sleep 2
@@ -181,13 +181,58 @@ jobs:
             exit 1
           fi
 
-      - name: Enable ADB TCP
+      - name: Setup ADB Authorization - FIXED (No Auth Popup Required)
         run: |
+          set -e
           export PATH=$ANDROID_HOME/platform-tools:$PATH
-          echo "Enabling ADB over TCP..."
+          
+          echo "✅ Step 1: Generating ADB keys locally..."
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/adbkey ]; then
+            echo "no" | adb keygen ~/.android/adbkey 2>/dev/null
+            echo "✅ Keys generated"
+          else
+            echo "✅ Keys already exist"
+          fi
+          
+          echo ""
+          echo "✅ Step 2: Preparing emulator filesystem..."
+          # Remount system as writable
+          adb shell mount -o rw,remount /system 2>/dev/null || true
+          adb shell mount -o rw,remount / 2>/dev/null || true
+          
+          echo ""
+          echo "✅ Step 3: Creating auth directory on emulator..."
+          adb shell mkdir -p /data/misc/adb
+          adb shell chmod 777 /data/misc/adb
+          
+          echo ""
+          echo "✅ Step 4: Pushing ADB public key..."
+          # Copy locally first
+          cp ~/.android/adbkey.pub /tmp/adb_keys
+          adb push /tmp/adb_keys /data/misc/adb/adb_keys 2>/dev/null || {
+            echo "Push failed, trying alternative method..."
+            adb shell 'cat > /data/misc/adb/adb_keys' < ~/.android/adbkey.pub
+          }
+          
+          echo ""
+          echo "✅ Step 5: Setting permissions..."
+          adb shell chmod 644 /data/misc/adb/adb_keys 2>/dev/null || true
+          adb shell ls -la /data/misc/adb/adb_keys
+          
+          echo ""
+          echo "✅ Step 6: Enabling ADB TCP port 5555..."
           adb tcpip 5555
           sleep 3
-          echo "✅ ADB TCP enabled"
+          
+          echo ""
+          echo "✅ Step 7: Verifying setup..."
+          adb devices
+          
+          echo ""
+          echo "========================================="
+          echo "✅ ADB SETUP COMPLETE - NO AUTHENTICATION!"
+          echo "========================================="
 
       - name: Start FRP Client
         run: |
@@ -208,22 +253,31 @@ jobs:
           
           echo "✅ FRP client started"
 
-      - name: Verify Setup
+      - name: Verify Complete Setup
         run: |
           export PATH=$ANDROID_HOME/platform-tools:$PATH
           
-          echo "========================================="
-          echo "✅ VERIFICATION PASSED"
-          echo "========================================="
           echo ""
-          echo "📱 Devices:"
+          echo "╔════════════════════════════════════════════════════════════════╗"
+          echo "║                    ✅ SETUP VERIFICATION                       ║"
+          echo "╚════════════════════════════════════════════════════════════════╝"
+          echo ""
+          
+          echo "📱 ADB Devices:"
           adb devices
           echo ""
-          echo "📊 Emulator Status:"
-          adb shell getprop ro.build.version.release || echo "Device warming up..."
+          
+          echo "📊 Emulator Information:"
+          adb shell getprop ro.build.version.release
+          adb shell getprop ro.hardware
           echo ""
-          echo "🌐 FRP Status:"
-          tail -5 /tmp/frpc.log
+          
+          echo "🌐 FRP Tunnel Status:"
+          sleep 2
+          if pgrep -f frpc > /dev/null; then
+            echo "✅ FRP tunnel is active"
+            tail -3 /tmp/frpc.log
+          fi
           echo ""
 
       - name: Setup SSH Terminal Access via tmate
@@ -243,65 +297,96 @@ jobs:
           MINS=$(((${{ env.RUNTIME_MINUTES }}) % 60))
           END_TIME=$(($(date +%s) + RUNTIME_SECONDS))
           
-          echo "========================================="
-          echo "✅ Android 11 Emulator Ready with FRP"
-          echo "========================================="
           echo ""
-          echo "📊 Configuration:"
+          echo "╔════════════════════════════════════════════════════════════════╗"
+          echo "║        🚀 Android 11 Emulator Ready with Play Store 🚀         ║"
+          echo "╚════════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "📊 CONFIGURATION:"
           echo "  • OS: Android 11 (API 30)"
           echo "  • Architecture: x86_64"
-          echo "  • RAM: 12 GB"
-          echo "  • Storage: 40 GB (/mnt)"
+          echo "  • RAM: 12 GB | Storage: 40 GB (/mnt)"
           echo "  • Play Store: ✅ ENABLED"
           echo ""
-          echo "🌐 Remote Connection:"
-          echo "  • VPS IP: 159.195.6.61"
-          echo "  • FRP Port: 7000"
-          echo "  • ADB Remote Port: 5555"
+          echo "🌐 REMOTE CONNECTION (NO AUTHENTICATION):"
           echo ""
-          echo "📱 Connect from Your Machine:"
-          echo "  adb connect 159.195.6.61:5555"
-          echo "  adb devices"
-          echo "  adb shell"
+          echo "  From Termux/Local Machine:"
+          echo "  ┌──────────────────────────────────────┐"
+          echo "  │ export ADB_VENDOR_KEYS=~/.android    │"
+          echo "  │ adb connect 159.195.6.61:5555        │"
+          echo "  │ adb devices                          │"
+          echo "  │ adb shell                            │"
+          echo "  └──────────────────────────────────────┘"
           echo ""
-          echo "⏱️  Runtime: $HOURS hours $MINS minutes"
-          echo "========================================="
+          echo "  Emulator will show:"
+          echo "  159.195.6.61:5555    device"
+          echo ""
+          echo "⏱️  RUNTIME: $HOURS hours $MINS minutes"
+          echo "Start: $(date)"
+          echo "End: $(date -d "+$HOURS hours +$MINS minutes")"
+          echo ""
+          echo "╔════════════════════════════════════════════════════════════════╗"
           echo ""
           
+          CHECK_INTERVAL=60
+          
           while [ $(date +%s) -lt $END_TIME ]; do
-            if ! adb devices 2>/dev/null | grep -q "device$"; then
-              echo "⚠️  Emulator offline. Restarting at $(date)..."
-              pkill -f "emulator" || true
-              sleep 5
+            REMAINING=$((END_TIME - $(date +%s)))
+            REMAINING_HOURS=$((REMAINING / 3600))
+            REMAINING_MINS=$(((REMAINING % 3600) / 60))
+            
+            # Check emulator
+            if adb devices 2>/dev/null | grep -q "emulator-5554"; then
+              EMULATOR="✅ Local"
+            elif adb devices 2>/dev/null | grep -q "device$"; then
+              EMULATOR="✅ Remote"
+            else
+              EMULATOR="⚠️  Recovery"
+              pkill -f "emulator -avd" || true
+              sleep 10
               
               nohup emulator -avd android_11 \
-                -no-window \
-                -no-audio \
-                -no-snapshot \
-                -accel on \
+                -no-window -no-audio -no-snapshot -accel on \
                 > /tmp/emulator.log 2>&1 &
               
-              sleep 40
-              
+              sleep 45
               adb kill-server 2>/dev/null || true
               sleep 2
               adb start-server
               sleep 5
               
               for i in {1..120}; do
-                if adb devices | grep -q "device$"; then
+                if adb devices 2>/dev/null | grep -q "device$"; then
                   adb tcpip 5555
-                  echo "✅ Emulator restarted at $(date)"
                   break
                 fi
                 sleep 1
               done
             fi
             
-            sleep 30
+            # Check FRP
+            if pgrep -f frpc > /dev/null; then
+              FRP="✅"
+            else
+              FRP="❌"
+            fi
+            
+            echo "[$(date '+%H:%M:%S')] Emulator: $EMULATOR | FRP: $FRP | Remaining: ${REMAINING_HOURS}h ${REMAINING_MINS}m"
+            
+            sleep $CHECK_INTERVAL
           done
           
           echo ""
-          echo "========================================="
-          echo "⏱️  Runtime completed"
-          echo "========================================="
+          echo "════════════════════════════════════════"
+          echo "⏱️  Session completed"
+          echo "════════════════════════════════════════"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          set +e
+          pkill -f "emulator -avd" || true
+          pkill -f "frpc" || true
+          pkill -9 qemu-system || true
+          sleep 2
+          echo "✅ Cleanup done"
