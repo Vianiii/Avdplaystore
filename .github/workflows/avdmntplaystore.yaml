@@ -117,11 +117,6 @@ jobs:
           CONFEND
           
           echo "✅ Configuration: 12GB RAM, 40GB storage, Play Store enabled"
-          
-          # Verify config
-          echo ""
-          echo "Configuration details:"
-          grep -E "PlayStore|tag.|hw." "$AVD_DIR/config.ini" | head -10
 
       - name: Download FRP Client
         run: |
@@ -133,7 +128,6 @@ jobs:
           wget -q https://github.com/fatedier/frp/releases/download/v${{ env.FRP_VERSION }}/frp_${{ env.FRP_VERSION }}_linux_amd64.tar.gz
           tar -xzf frp_${{ env.FRP_VERSION }}_linux_amd64.tar.gz
           
-          ls -lah /tmp/frp/frp_${{ env.FRP_VERSION }}_linux_amd64/
           echo "✅ FRP downloaded"
 
       - name: Configure FRP Client
@@ -159,7 +153,6 @@ jobs:
           FRPCONF
           
           echo "✅ FRP client configured"
-          cat /tmp/frp/frpc.toml
 
       - name: Start Emulator
         run: |
@@ -202,8 +195,6 @@ jobs:
             
             if ! kill -0 $PID 2>/dev/null; then
               echo "❌ Emulator crashed"
-              echo ""
-              echo "=== Emulator Logs ==="
               tail -30 /tmp/emulator.log
               exit 1
             fi
@@ -221,21 +212,42 @@ jobs:
             exit 1
           fi
           
-          # Wait for system ready
-          echo "Waiting for system to stabilize..."
           sleep 15
 
-      - name: Enable ADB TCP
+      - name: Authorize ADB for Remote Access (No Auth Required)
         run: |
           set -e
           export PATH=$ANDROID_HOME/platform-tools:$PATH
           
-          echo "Enabling ADB over TCP..."
+          echo "Setting up ADB for unauthenticated remote access..."
+          
+          # Generate ADB keys
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/adbkey ]; then
+            echo "no" | adb keygen ~/.android/adbkey
+          fi
+          
+          # Create authorized_keys on emulator
+          adb shell mkdir -p /data/misc/adb
+          adb shell rm -f /data/misc/adb/adb_keys
+          
+          # Push public key
+          adb push ~/.android/adbkey.pub /data/misc/adb/adb_keys
+          adb shell chmod 644 /data/misc/adb/adb_keys
+          
+          # Verify
+          adb shell ls -la /data/misc/adb/adb_keys
+          
+          echo "Enabling ADB over TCP (unauthenticated)..."
           adb tcpip 5555
           sleep 3
           
-          adb shell getprop ro.build.version.release
-          echo "✅ ADB TCP enabled"
+          # Test local TCP connection
+          adb connect 127.0.0.1:5555
+          sleep 2
+          
+          echo "✅ ADB authorized for remote access - NO AUTHENTICATION NEEDED"
+          adb devices
 
       - name: Start FRP Client
         run: |
@@ -275,22 +287,16 @@ jobs:
           echo "📊 Emulator Properties:"
           adb shell getprop ro.build.version.release
           adb shell getprop ro.build.version.sdk
-          adb shell getprop ro.hardware
-          echo ""
-          
-          echo "🌐 FRP Status:"
-          echo "---"
-          tail -10 /tmp/frpc.log || echo "No logs yet"
-          echo "---"
           echo ""
 
-      - name: Setup SSH Terminal Access
+      - name: Setup Persistent tmate Session
         uses: mxschmitt/action-tmate@v3
         with:
           limit-access-to-actor: false
           connect-timeout-seconds: 120
+          timeout-minutes: 360
 
-      - name: Monitor and Keep Running
+      - name: Monitor and Keep Running (Persistent tmate)
         run: |
           set -e
           export HOME=/mnt/android-home
@@ -304,35 +310,32 @@ jobs:
           
           echo ""
           echo "========================================="
-          echo "✅ Android 11 Emulator Ready with Play Store & FRP"
+          echo "✅ Android 11 with Play Store - READY"
           echo "========================================="
           echo ""
           echo "📊 Configuration:"
           echo "  • OS: Android 11 (API 30)"
           echo "  • Architecture: x86_64"
-          echo "  • RAM: 12 GB"
-          echo "  • Storage: 40 GB (/mnt)"
+          echo "  • RAM: 12 GB | Storage: 40 GB (/mnt)"
           echo "  • Play Store: ✅ ENABLED"
           echo ""
-          echo "🌐 Remote Connection Methods:"
-          echo "  • VPS IP: 159.195.6.61"
-          echo "  • FRP Server Port: 7000"
+          echo "🌐 REMOTE CONNECTION (NO AUTHENTICATION REQUIRED):"
           echo ""
-          echo "1️⃣  ADB Remote Access (port 5555):"
+          echo "1️⃣  ADB DIRECT CONNECTION:"
           echo "   adb connect 159.195.6.61:5555"
           echo "   adb devices"
           echo "   adb shell"
           echo ""
-          echo "2️⃣  SSH Terminal Access (port 2222):"
+          echo "2️⃣  SSH TERMINAL:"
           echo "   ssh -p 2222 runner@159.195.6.61"
           echo ""
-          echo "3️⃣  Play Store:"
-          echo "   • Accessible on emulator home screen"
-          echo "   • Install apps via ADB shell"
+          echo "3️⃣  PERSISTENT TMATE SESSION:"
+          echo "   ssh token@nyc1.tmate.io"
+          echo "   (You're currently in it - can reconnect anytime)"
           echo ""
           echo "⏱️  Runtime: $HOURS hours $MINS minutes"
-          echo "Start Time: $(date)"
-          echo "Expected End: $(date -d "+$HOURS hours +$MINS minutes")"
+          echo "Start: $(date)"
+          echo "End: $(date -d "+$HOURS hours +$MINS minutes")"
           echo "========================================="
           echo ""
           
@@ -344,22 +347,20 @@ jobs:
             REMAINING_SECS=$((REMAINING % 60))
             
             # Check ADB connection
-            if adb devices 2>/dev/null | grep -q "device$"; then
-              STATUS="✅ Connected"
+            if adb devices 2>/dev/null | grep -q "emulator-5554"; then
+              STATUS="✅ Emulator"
+            elif adb devices 2>/dev/null | grep -q "device$"; then
+              STATUS="✅ TCP Remote"
             else
-              STATUS="⚠️  Offline - Attempting recovery..."
+              STATUS="⚠️  Offline"
               pkill -f "emulator" || true
               sleep 5
               
               nohup emulator -avd ${{ env.AVD_NAME }} \
-                -no-window \
-                -no-audio \
-                -no-snapshot \
-                -accel on \
+                -no-window -no-audio -no-snapshot -accel on \
                 > /tmp/emulator.log 2>&1 &
               
               sleep 45
-              
               adb kill-server 2>/dev/null || true
               sleep 2
               adb start-server
@@ -377,50 +378,48 @@ jobs:
             
             # Check FRP
             if pgrep -f "frpc" > /dev/null; then
-              FRP_STATUS="✅ Active"
+              FRP_STATUS="✅"
             else
-              FRP_STATUS="⚠️  Inactive"
+              FRP_STATUS="❌"
             fi
             
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ADB: $STATUS | FRP: $FRP_STATUS | Remaining: ${REMAINING_MINS}:$(printf '%02d' $REMAINING_SECS)"
+            # Check tmate
+            if pgrep -f "tmate" > /dev/null; then
+              TMATE_STATUS="✅"
+            else
+              TMATE_STATUS="❌"
+            fi
+            
+            echo "[$(date '+%H:%M:%S')] ADB: $STATUS | FRP: $FRP_STATUS | tmate: $TMATE_STATUS | Remaining: ${REMAINING_MINS}m"
             
             sleep $CHECK_INTERVAL
           done
           
           echo ""
           echo "========================================="
-          echo "⏱️  Runtime completed at $(date)"
+          echo "⏱️  Runtime completed"
           echo "========================================="
 
       - name: Collect Debug Logs
         if: always()
         run: |
-          set -e
           mkdir -p debug_logs
           
-          echo "Collecting system information..."
           {
-            echo "=== Collection Time ==="
+            echo "=== Time ==="
             date
             echo ""
             echo "=== System Info ==="
             uname -a
             echo ""
-            echo "=== Java Version ==="
-            java -version 2>&1 || echo "Java not available"
-            echo ""
-            echo "=== Android SDK ==="
-            which sdkmanager
+            echo "=== Processes ==="
+            ps aux | grep -E "emulator|qemu|frpc|tmate" || echo "No processes"
             echo ""
             echo "=== ADB Status ==="
-            adb devices || echo "ADB unavailable"
-            echo ""
-            echo "=== Emulator Processes ==="
-            ps aux | grep -E "emulator|qemu|frpc" || echo "No processes found"
+            adb devices 2>/dev/null || echo "ADB unavailable"
             echo ""
             echo "=== /mnt Usage ==="
-            du -sh /mnt/* 2>/dev/null || echo "/mnt info unavailable"
-            echo ""
+            du -sh /mnt/* 2>/dev/null || echo "No info"
           } > debug_logs/system-info.txt
           
           ls -lah debug_logs/
@@ -429,16 +428,13 @@ jobs:
         if: always()
         run: |
           set +e
-          echo "Cleaning up processes..."
-          
-          pkill -f "emulator -avd" || true
+          pkill -f "emulator" || true
           pkill -f "frpc" || true
           pkill -9 qemu-system || true
-          
           sleep 2
-          echo "✅ Cleanup complete"
+          echo "✅ Cleanup done"
 
-      - name: Upload All Artifacts
+      - name: Upload Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -448,11 +444,3 @@ jobs:
             /tmp/frpc.log
             debug_logs/
           retention-days: 3
-
-      - name: Upload Emulator Configuration
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playstore-config-${{ github.run_number }}
-          path: /mnt/android-home/.android/avd/
-          retention-days: 2
