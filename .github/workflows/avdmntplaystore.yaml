@@ -1,4 +1,4 @@
-name: Android mnt play store
+name: Android mnt play store 
 
 on:
   push:
@@ -42,10 +42,7 @@ jobs:
         run: |
           export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
           sdkmanager "emulator" "platform-tools"
-          echo "Installing Google Play Store system image..."
           sdkmanager "system-images;android-30;google_apis_playstore;x86_64"
-          echo "Verifying installation..."
-          sdkmanager --list | grep "google_apis_playstore"
 
       - name: Create AVD on /mnt with Play Store
         run: |
@@ -59,7 +56,6 @@ jobs:
           export HOME=/mnt/android-home
           export ANDROID_AVD_HOME=$AVD_HOME
           
-          echo "Creating AVD with Play Store..."
           echo no | avdmanager create avd \
             --force \
             --name "$AVD_NAME" \
@@ -67,17 +63,8 @@ jobs:
             --device "pixel"
           
           sleep 3
-          avdmanager list avd
           
           AVD_DIR="$AVD_HOME/$AVD_NAME.avd"
-          if [ ! -d "$AVD_DIR" ]; then
-            echo "❌ AVD not created at $AVD_DIR"
-            ls -la "$AVD_HOME"
-            exit 1
-          fi
-          echo "✅ AVD created: $AVD_DIR"
-          
-          # Configure with Play Store settings
           cat >> "$AVD_DIR/config.ini" << 'CONFEND'
           hw.ramSize=12288
           hw.arch=x86_64
@@ -94,13 +81,7 @@ jobs:
           hw.mainKeys=no
           hw.lcd.density=440
           PlayStore.enabled=true
-          image.sysdir.1=system-images/android-30/google_apis_playstore/x86_64/
           CONFEND
-          
-          echo "=== AVD Config ==="
-          cat "$AVD_DIR/config.ini"
-          echo ""
-          df -h /mnt
 
       - name: Start Emulator from /mnt
         run: |
@@ -131,53 +112,30 @@ jobs:
             fi
             if ! kill -0 $PID 2>/dev/null; then
               echo "❌ Emulator died"
-              cat /tmp/emulator.log
               exit 1
-            fi
-            if [ $((i % 30)) -eq 0 ]; then
-              echo "Boot progress: $i/180..."
-              tail -5 /tmp/emulator.log
             fi
             sleep 1
           done
           if [ $SUCCESS -eq 0 ]; then
             echo "❌ Boot failed"
-            cat /tmp/emulator.log
             exit 1
           fi
 
-      - name: Verify Play Store Installation
+      - name: Authorize ADB
         run: |
           export PATH=$ANDROID_HOME/platform-tools:$PATH
-          echo "Checking Play Store..."
-          adb -s emulator-5554 shell "pm list packages | grep -i play"
-          adb -s emulator-5554 shell "ls -la /system/app/ | grep -i play"
-          echo "✅ Play Store verified"
+          adb -s emulator-5554 shell "echo OK" > /dev/null
+          sleep 2
 
-      - name: Authorize ADB Before TCP Mode
+      - name: Switch to TCP Mode
         run: |
           export PATH=$ANDROID_HOME/platform-tools:$PATH
-          adb -s emulator-5554 shell "echo ADB Authorized"
-          echo "✅ ADB key accepted"
-
-      - name: Enable ADB TCP and Disconnect USB
-        run: |
-          export PATH=$ANDROID_HOME/platform-tools:$PATH
-          adb devices
           adb -s emulator-5554 tcpip 5555
-          sleep 5
-          adb -s emulator-5554 disconnect || true
+          sleep 3
+          adb disconnect
           sleep 2
           adb connect 127.0.0.1:5555
           sleep 3
-          adb devices
-
-      - name: Disconnect USB Emulator
-        run: |
-          export PATH=$ANDROID_HOME/platform-tools:$PATH
-          adb disconnect emulator-5554 || true
-          sleep 2
-          echo "=== Final Device List ==="
           adb devices
 
       - name: Setup frpc
@@ -195,35 +153,23 @@ jobs:
           local_port = 5555
           remote_port = 5555
           FRPEND
-
-      - name: Start frpc
-        run: |
+          
           wget -q https://github.com/fatedier/frp/releases/download/v0.58.1/frp_0.58.1_linux_amd64.tar.gz
           tar -xzf frp_0.58.1_linux_amd64.tar.gz
           nohup ./frp_0.58.1_linux_amd64/frpc -c frpc.ini > frpc.log 2>&1 &
           sleep 10
-          cat frpc.log
 
       - name: Verify Setup
         run: |
           export PATH=$ANDROID_HOME/platform-tools:$PATH
-          echo "=== Device Info ==="
+          echo "=== Connected Device ==="
           adb devices
           echo ""
-          echo "=== Memory (12GB) ==="
-          adb -s 127.0.0.1:5555 shell "cat /proc/meminfo | grep MemTotal"
+          echo "=== System Info ==="
+          adb shell "getprop ro.build.version.release"
           echo ""
-          echo "=== Internal Storage (40GB) ==="
-          adb -s 127.0.0.1:5555 shell "df -h /data" 2>/dev/null || echo "Checking..."
-          echo ""
-          echo "=== Play Store Status ==="
-          adb -s 127.0.0.1:5555 shell "pm list packages | grep -i play" || echo "Play Store not found"
-          echo ""
-          echo "=== /mnt Usage ==="
-          df -h /mnt
-          echo ""
-          echo "=== Ports ==="
-          netstat -tuln | grep -E '5555|7000'
+          echo "=== Memory ==="
+          adb shell "cat /proc/meminfo | grep MemTotal"
 
       - name: Keep Running
         run: |
@@ -232,24 +178,13 @@ jobs:
           HOURS=$(((${{ env.RUNTIME_MINUTES }}) / 60))
           MINS=$(((${{ env.RUNTIME_MINUTES }}) % 60))
           echo "========================================="
-          echo "✅ Android 11 x86_64 Emulator Ready"
+          echo "✅ Android 11 Emulator Ready"
           echo "========================================="
           echo ""
-          echo "📊 Specifications:"
-          echo "  • OS: Android 11 (API 30) + Play Store ✓"
-          echo "  • Architecture: x86_64"
-          echo "  • RAM: 12 GB"
-          echo "  • Internal Storage: 40 GB (/mnt)"
-          echo "  • Location: /mnt/android-home"
-          echo "  • Acceleration: KVM"
-          echo ""
-          echo "🔌 Remote Access:"
-          echo "  • FRP Server: 159.195.6.61:7000"
-          echo "  • Remote ADB: 159.195.6.61:5555"
-          echo ""
-          echo "📱 Connect from your machine:"
+          echo "📱 Remote ADB Command:"
           echo "  $ adb connect 159.195.6.61:5555"
           echo ""
+          echo "📊 Specs: 12GB RAM, 40GB Storage, Play Store"
           echo "⏱️  Runtime: $HOURS h $MINS m"
           echo "========================================="
           sleep $RUNTIME_SECONDS
