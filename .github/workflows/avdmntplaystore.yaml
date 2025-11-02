@@ -1,4 +1,4 @@
-name: Android mnt SSH Terminal with FRP - FIXED
+name: Android mnt SSH Terminal with FRP - No Auth
 
 on:
   push:
@@ -181,58 +181,31 @@ jobs:
             exit 1
           fi
 
-      - name: Setup ADB Authorization - FIXED (No Auth Popup Required)
+      - name: Disable ADB Authentication - ALLOW ANY CONNECTION
         run: |
           set -e
           export PATH=$ANDROID_HOME/platform-tools:$PATH
           
-          echo "✅ Step 1: Generating ADB keys locally..."
-          mkdir -p ~/.android
-          if [ ! -f ~/.android/adbkey ]; then
-            echo "no" | adb keygen ~/.android/adbkey 2>/dev/null
-            echo "✅ Keys generated"
-          else
-            echo "✅ Keys already exist"
-          fi
+          echo "Step 1: Disabling ADB authentication on emulator..."
+          # Remove all ADB keys to disable authentication
+          adb shell rm -f /data/misc/adb/adb_keys || true
           
-          echo ""
-          echo "✅ Step 2: Preparing emulator filesystem..."
-          # Remount system as writable
-          adb shell mount -o rw,remount /system 2>/dev/null || true
-          adb shell mount -o rw,remount / 2>/dev/null || true
+          echo "Step 2: Restarting ADB daemon..."
+          adb shell stop adbd
+          sleep 2
+          adb shell start adbd
+          sleep 3
           
-          echo ""
-          echo "✅ Step 3: Creating auth directory on emulator..."
-          adb shell mkdir -p /data/misc/adb
-          adb shell chmod 777 /data/misc/adb
-          
-          echo ""
-          echo "✅ Step 4: Pushing ADB public key..."
-          # Copy locally first
-          cp ~/.android/adbkey.pub /tmp/adb_keys
-          adb push /tmp/adb_keys /data/misc/adb/adb_keys 2>/dev/null || {
-            echo "Push failed, trying alternative method..."
-            adb shell 'cat > /data/misc/adb/adb_keys' < ~/.android/adbkey.pub
-          }
-          
-          echo ""
-          echo "✅ Step 5: Setting permissions..."
-          adb shell chmod 644 /data/misc/adb/adb_keys 2>/dev/null || true
-          adb shell ls -la /data/misc/adb/adb_keys
-          
-          echo ""
-          echo "✅ Step 6: Enabling ADB TCP port 5555..."
+          echo "Step 3: Enabling ADB TCP port 5555..."
           adb tcpip 5555
           sleep 3
           
-          echo ""
-          echo "✅ Step 7: Verifying setup..."
+          echo "Step 4: Verification..."
           adb devices
           
           echo ""
-          echo "========================================="
-          echo "✅ ADB SETUP COMPLETE - NO AUTHENTICATION!"
-          echo "========================================="
+          echo "✅ ADB AUTHENTICATION DISABLED"
+          echo "✅ Ready for unauthenticated remote connections"
 
       - name: Start FRP Client
         run: |
@@ -259,7 +232,7 @@ jobs:
           
           echo ""
           echo "╔════════════════════════════════════════════════════════════════╗"
-          echo "║                    ✅ SETUP VERIFICATION                       ║"
+          echo "║               ✅ SETUP COMPLETE - NO AUTH REQUIRED              ║"
           echo "╚════════════════════════════════════════════════════════════════╝"
           echo ""
           
@@ -269,14 +242,11 @@ jobs:
           
           echo "📊 Emulator Information:"
           adb shell getprop ro.build.version.release
-          adb shell getprop ro.hardware
           echo ""
           
           echo "🌐 FRP Tunnel Status:"
-          sleep 2
           if pgrep -f frpc > /dev/null; then
             echo "✅ FRP tunnel is active"
-            tail -3 /tmp/frpc.log
           fi
           echo ""
 
@@ -307,23 +277,19 @@ jobs:
           echo "  • Architecture: x86_64"
           echo "  • RAM: 12 GB | Storage: 40 GB (/mnt)"
           echo "  • Play Store: ✅ ENABLED"
+          echo "  • ADB Authentication: ❌ DISABLED"
           echo ""
-          echo "🌐 REMOTE CONNECTION (NO AUTHENTICATION):"
+          echo "🌐 REMOTE CONNECTION (DIRECT - NO AUTH):"
           echo ""
           echo "  From Termux/Local Machine:"
           echo "  ┌──────────────────────────────────────┐"
-          echo "  │ export ADB_VENDOR_KEYS=~/.android    │"
           echo "  │ adb connect 159.195.6.61:5555        │"
           echo "  │ adb devices                          │"
           echo "  │ adb shell                            │"
+          echo "  │ adb install app.apk                  │"
           echo "  └──────────────────────────────────────┘"
           echo ""
-          echo "  Emulator will show:"
-          echo "  159.195.6.61:5555    device"
-          echo ""
           echo "⏱️  RUNTIME: $HOURS hours $MINS minutes"
-          echo "Start: $(date)"
-          echo "End: $(date -d "+$HOURS hours +$MINS minutes")"
           echo ""
           echo "╔════════════════════════════════════════════════════════════════╗"
           echo ""
@@ -336,12 +302,10 @@ jobs:
             REMAINING_MINS=$(((REMAINING % 3600) / 60))
             
             # Check emulator
-            if adb devices 2>/dev/null | grep -q "emulator-5554"; then
-              EMULATOR="✅ Local"
-            elif adb devices 2>/dev/null | grep -q "device$"; then
-              EMULATOR="✅ Remote"
+            if adb devices 2>/dev/null | grep -q "device$"; then
+              EMULATOR="✅"
             else
-              EMULATOR="⚠️  Recovery"
+              EMULATOR="⚠️"
               pkill -f "emulator -avd" || true
               sleep 10
               
