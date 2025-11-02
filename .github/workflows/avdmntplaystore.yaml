@@ -1,0 +1,236 @@
+name: Android mnt play store
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      runtime_minutes:
+        description: 'How long to keep emulator running (minutes)'
+        required: false
+        default: '360'
+
+jobs:
+  android-emulator:
+    runs-on: ubuntu-latest
+
+    env:
+      AVD_NAME: android_11
+      RUNTIME_MINUTES: ${{ github.event.inputs.runtime_minutes || '360' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo chmod 666 /dev/kvm 2>/dev/null || true
+
+      - name: Check /mnt Space
+        run: |
+          echo "=== /mnt Volume ==="
+          df -h /mnt
+          sudo mkdir -p /mnt/android-sdk-data
+          sudo chown -R runner:runner /mnt/android-sdk-data 2>/dev/null || true
+
+      - name: Install x86_64 System Image
+        run: |
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
+          sdkmanager "emulator" "platform-tools"
+          sdkmanager "system-images;android-30;google_apis_playstore;x86_64"
+
+      - name: Create AVD on /mnt with Full Control
+        run: |
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
+          sudo mkdir -p /mnt/android-home/.android/avd
+          sudo chown -R runner:runner /mnt/android-home
+          
+          AVD_HOME=/mnt/android-home/.android/avd
+          AVD_NAME=${{ env.AVD_NAME }}
+          
+          export HOME=/mnt/android-home
+          export ANDROID_AVD_HOME=$AVD_HOME
+          
+          echo "Creating AVD with HOME=$HOME and ANDROID_AVD_HOME=$ANDROID_AVD_HOME"
+          echo no | avdmanager create avd \
+            --force \
+            --name "$AVD_NAME" \
+            --package "system-images;android-30;google_apis_playstore;x86_64" \
+            --device "pixel"
+          
+          sleep 3
+          avdmanager list avd
+          
+          AVD_DIR="$AVD_HOME/$AVD_NAME.avd"
+          if [ ! -d "$AVD_DIR" ]; then
+            echo "❌ AVD not created at $AVD_DIR"
+            ls -la "$AVD_HOME"
+            exit 1
+          fi
+          echo "✅ AVD created: $AVD_DIR"
+          
+          cat >> "$AVD_DIR/config.ini" << 'CONFEND'
+          hw.ramSize=12288
+          hw.arch=x86_64
+          hw.cpu.model=qemu64
+          disk.dataPartition.size=40960m
+          hw.gpu.mode=auto
+          hw.gpu.enabled=yes
+          hw.accelerometer=yes
+          hw.gps=yes
+          hw.battery=yes
+          hw.audioInput=yes
+          hw.audioOutput=yes
+          hw.keyboard=yes
+          hw.mainKeys=no
+          hw.lcd.density=440
+          CONFEND
+          
+          cat "$AVD_DIR/config.ini"
+          df -h /mnt
+
+      - name: Start Emulator from /mnt
+        run: |
+          export HOME=/mnt/android-home
+          export ANDROID_AVD_HOME=/mnt/android-home/.android/avd
+          export PATH=$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH
+          AVD_NAME=${{ env.AVD_NAME }}
+          nohup emulator -avd "$AVD_NAME" \
+            -no-window \
+            -no-audio \
+            -no-snapshot \
+            -accel on \
+            -no-metrics \
+            > /tmp/emulator.log 2>&1 &
+          PID=$!
+          echo "Emulator PID: $PID"
+          sleep 35
+          adb kill-server 2>/dev/null || true
+          sleep 2
+          adb start-server
+          sleep 5
+          SUCCESS=0
+          for i in {1..180}; do
+            if adb devices | grep -q "device$"; then
+              echo "✅ Emulator booted! ($i sec)"
+              SUCCESS=1
+              break
+            fi
+            if ! kill -0 $PID 2>/dev/null; then
+              echo "❌ Emulator died"
+              cat /tmp/emulator.log
+              exit 1
+            fi
+            if [ $((i % 30)) -eq 0 ]; then
+              echo "Boot progress: $i/180..."
+              tail -5 /tmp/emulator.log
+            fi
+            sleep 1
+          done
+          if [ $SUCCESS -eq 0 ]; then
+            echo "❌ Boot failed"
+            cat /tmp/emulator.log
+            exit 1
+          fi
+
+      - name: Authorize ADB Before TCP Mode
+        run: |
+          export PATH=$ANDROID_HOME/platform-tools:$PATH
+          adb -s emulator-5554 shell "echo ADB Authorized"
+          echo "✅ ADB key accepted"
+
+      - name: Enable ADB TCP and Disconnect USB
+        run: |
+          export PATH=$ANDROID_HOME/platform-tools:$PATH
+          adb devices
+          adb -s emulator-5554 tcpip 5555
+          sleep 5
+          adb -s emulator-5554 disconnect || true
+          sleep 2
+          adb connect 127.0.0.1:5555
+          sleep 3
+          adb devices
+
+      - name: Disconnect USB Emulator
+        run: |
+          export PATH=$ANDROID_HOME/platform-tools:$PATH
+          adb disconnect emulator-5554 || true
+          sleep 2
+          echo "=== Final Device List ==="
+          adb devices
+
+      - name: Setup frpc
+        run: |
+          cat > frpc.ini << 'FRPEND'
+          [common]
+          server_addr = 159.195.6.61
+          server_port = 7000
+          connect_timeout = 10
+          dial_timeout = 10
+
+          [adb]
+          type = tcp
+          local_ip = 127.0.0.1
+          local_port = 5555
+          remote_port = 5555
+          FRPEND
+
+      - name: Start frpc
+        run: |
+          wget -q https://github.com/fatedier/frp/releases/download/v0.58.1/frp_0.58.1_linux_amd64.tar.gz
+          tar -xzf frp_0.58.1_linux_amd64.tar.gz
+          nohup ./frp_0.58.1_linux_amd64/frpc -c frpc.ini > frpc.log 2>&1 &
+          sleep 10
+          cat frpc.log
+
+      - name: Verify Setup
+        run: |
+          export PATH=$ANDROID_HOME/platform-tools:$PATH
+          echo "=== Device Info ==="
+          adb devices
+          echo ""
+          echo "=== Memory (12GB) ==="
+          adb -s 127.0.0.1:5555 shell "cat /proc/meminfo | grep MemTotal"
+          echo ""
+          echo "=== Internal Storage (40GB) ==="
+          adb -s 127.0.0.1:5555 shell "df -h /data" 2>/dev/null || echo "Checking..."
+          echo ""
+          echo "=== /mnt Usage ==="
+          df -h /mnt
+          echo ""
+          echo "=== Ports ==="
+          netstat -tuln | grep -E '5555|7000'
+
+      - name: Keep Running
+        run: |
+          export PATH=$ANDROID_HOME/platform-tools:$PATH
+          RUNTIME_SECONDS=$(((${{ env.RUNTIME_MINUTES }}) * 60))
+          HOURS=$(((${{ env.RUNTIME_MINUTES }}) / 60))
+          MINS=$(((${{ env.RUNTIME_MINUTES }}) % 60))
+          echo "========================================="
+          echo "✅ Android 11 x86_64 Emulator Ready"
+          echo "========================================="
+          echo ""
+          echo "📊 Specifications:"
+          echo "  • OS: Android 11 (API 30) + Play Store"
+          echo "  • Architecture: x86_64"
+          echo "  • RAM: 12 GB"
+          echo "  • Internal Storage: 40 GB (/mnt)"
+          echo "  • Location: /mnt/android-home"
+          echo "  • Acceleration: KVM"
+          echo ""
+          echo "🔌 Remote Access:"
+          echo "  • FRP Server: 159.195.6.61:7000"
+          echo "  • Remote ADB: 159.195.6.61:5555"
+          echo ""
+          echo "📱 Connect from your machine:"
+          echo "  $ adb connect 159.195.6.61:5555"
+          echo ""
+          echo "⏱️  Runtime: $HOURS h $MINS m"
+          echo "========================================="
+          sleep $RUNTIME_SECONDS
