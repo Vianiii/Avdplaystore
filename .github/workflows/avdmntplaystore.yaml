@@ -127,14 +127,12 @@ jobs:
           adb -s emulator-5554 shell "echo OK" > /dev/null
           sleep 2
 
-      - name: Switch to TCP Mode Only
+      - name: Switch to TCP Mode
         run: |
           export PATH=$ANDROID_HOME/platform-tools:$PATH
           adb -s emulator-5554 tcpip 5555
           sleep 3
-          adb kill-server
-          sleep 2
-          adb start-server
+          adb disconnect
           sleep 2
           adb connect 127.0.0.1:5555
           sleep 3
@@ -168,10 +166,10 @@ jobs:
           adb devices
           echo ""
           echo "=== System Info ==="
-          adb -s 127.0.0.1:5555 shell "getprop ro.build.version.release"
+          adb shell "getprop ro.build.version.release"
           echo ""
           echo "=== Memory ==="
-          adb -s 127.0.0.1:5555 shell "cat /proc/meminfo | grep MemTotal"
+          adb shell "cat /proc/meminfo | grep MemTotal"
 
       - name: Keep Running
         run: |
@@ -179,9 +177,6 @@ jobs:
           RUNTIME_SECONDS=$(((${{ env.RUNTIME_MINUTES }}) * 60))
           HOURS=$(((${{ env.RUNTIME_MINUTES }}) / 60))
           MINS=$(((${{ env.RUNTIME_MINUTES }}) % 60))
-          
-          adb -s 127.0.0.1:5555 shell "echo OK"
-          
           echo "========================================="
           echo "✅ Android 11 Emulator Ready"
           echo "========================================="
